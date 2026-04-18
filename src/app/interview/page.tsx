@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { useIntegrityMonitor } from '@/hooks/useIntegrityMonitor';
 
 type TranscriptEntry = { role: 'anaya' | 'candidate'; text: string; timestamp: number };
 type InterviewState = 'loading' | 'anaya_speaking' | 'waiting' | 'listening' | 'processing' | 'complete';
@@ -96,16 +97,74 @@ function InterviewContent() {
   const [statusMsg, setStatusMsg] = useState('Connecting to Anaya...');
   const [followUpCount, setFollowUpCount] = useState(0);
   const [followUpUsedFor, setFollowUpUsedFor] = useState<number | null>(null);
+  const [timeoutMsg, setTimeoutMsg] = useState('');
+  const [tabWarning, setTabWarning] = useState(false);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const hasStarted = useRef(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // --- NEW: Refs to track when audio finishes playing ---
+  const pendingTurnRef = useRef<{
+    transcript: TranscriptEntry[];
+    turn: number;
+    followUpCount: number;
+    followUpUsedFor: number | null;
+  } | null>(null);
+  const prevIsPlaying = useRef(false);
+
+  const PROMPT_TIMEOUT = 45000;
+  const SKIP_TIMEOUT = 90000;
 
   const { stopListening, startListening, isListening } = useSpeechRecognition();
   const { isPlaying, isFetching, playText, analyserNode } = useAudioPlayer();
+  const { signals, recordResponseStart } = useIntegrityMonitor(state === 'waiting');
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
+
+  // Save progress to localStorage for session resume
+  useEffect(() => {
+    if (!sessionId || state === 'loading') return;
+    localStorage.setItem('anaya_session', JSON.stringify({
+      sessionId, candidateName, turnIndex,
+      followUpCount, followUpUsedFor, savedAt: Date.now(),
+    }));
+  }, [sessionId, candidateName, turnIndex, followUpCount, followUpUsedFor, state]);
+
+  useEffect(() => {
+    if (state === 'complete') localStorage.removeItem('anaya_session');
+  }, [state]);
+
+  // Tab switch warning — visible banner
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.hidden && (state === 'waiting' || state === 'listening')) {
+        setTabWarning(true);
+        // Auto-dismiss after 6 seconds
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+        warningTimerRef.current = setTimeout(() => setTabWarning(false), 6000);
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    };
+  }, [state]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  function clearTimeouts() {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+  }
 
   const saveTranscriptTurn = useCallback(
     async (role: 'anaya' | 'candidate', text: string, index: number) => {
@@ -113,12 +172,8 @@ function InterviewContent() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: sessionId,
-          action: 'add_turn',
-          role,
-          text,
-          turn_index: index,
-          timestamp_ms: Date.now(),
+          session_id: sessionId, action: 'add_turn',
+          role, text, turn_index: index, timestamp_ms: Date.now(),
         }),
       });
     },
@@ -128,17 +183,24 @@ function InterviewContent() {
   const triggerAssessment = useCallback(async () => {
     setState('complete');
     setStatusMsg('Generating your assessment report...');
+    clearTimeouts();
     try {
       await fetch('/api/assess', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId }),
+        body: JSON.stringify({ session_id: sessionId, integrity_signals: signals }),
       });
-    } catch {
-      // still redirect even if assess fails
-    }
+    } catch { /* still redirect */ }
     router.push(`/report/${sessionId}`);
-  }, [sessionId, router]);
+  }, [sessionId, router, signals]);
+
+  // Auto-start mic after Anaya finishes speaking
+  const autoStartMic = useCallback(async () => {
+    recordResponseStart();
+    setState('listening');
+    setStatusMsg('Your turn — speak now...');
+    startListening();
+  }, [startListening, recordResponseStart]);
 
   const sendToAnaya = useCallback(
     async (
@@ -149,6 +211,9 @@ function InterviewContent() {
     ) => {
       setState('processing');
       setStatusMsg('Anaya is thinking...');
+      clearTimeouts();
+      setTimeoutMsg('');
+
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -175,9 +240,7 @@ function InterviewContent() {
         if (data.follow_up_used_for !== undefined) setFollowUpUsedFor(data.follow_up_used_for);
 
         const newEntry: TranscriptEntry = {
-          role: 'anaya',
-          text: data.text,
-          timestamp: Date.now(),
+          role: 'anaya', text: data.text, timestamp: Date.now(),
         };
         setTranscript((prev) => [...prev, newEntry]);
         setTurnIndex(data.next_turn);
@@ -189,16 +252,67 @@ function InterviewContent() {
         if (data.interview_complete) {
           await triggerAssessment();
         } else {
-          setState('waiting');
-          setStatusMsg('Your turn — press the mic to respond');
+          // --- NEW: Instead of instantly starting the mic, we save the turn data ---
+          // The useEffect below will handle starting the mic when audio finishes.
+          pendingTurnRef.current = {
+            transcript: currentTranscript,
+            turn: currentTurn,
+            followUpCount: currentFollowUpCount,
+            followUpUsedFor: currentFollowUpUsedFor,
+          };
         }
       } catch (err) {
         console.error(err);
         setStatusMsg('Connection issue. Please refresh the page.');
       }
     },
-    [sessionId, candidateName, playText, triggerAssessment]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessionId, candidateName, playText, triggerAssessment, autoStartMic]
   );
+
+  function startTimeoutWatcher(
+    currentTranscript: TranscriptEntry[],
+    currentTurn: number,
+    currentFollowUpCount: number,
+    currentFollowUpUsedFor: number | null
+  ) {
+    clearTimeouts();
+    setTimeoutMsg('');
+
+    timeoutRef.current = setTimeout(() => {
+      setTimeoutMsg("Take your time — respond whenever you're ready.");
+
+      timeoutRef.current = setTimeout(async () => {
+        setTimeoutMsg('');
+        // Stop recording if still going
+        await stopListening();
+        const entry: TranscriptEntry = {
+          role: 'candidate',
+          text: '[No response — candidate did not answer in time]',
+          timestamp: Date.now(),
+        };
+        const newTranscript = [...currentTranscript, entry];
+        setTranscript(newTranscript);
+        await saveTranscriptTurn('candidate', entry.text, currentTurn);
+        await sendToAnaya(newTranscript, currentTurn + 1, currentFollowUpCount, currentFollowUpUsedFor);
+      }, SKIP_TIMEOUT - PROMPT_TIMEOUT);
+
+    }, PROMPT_TIMEOUT);
+  }
+
+  // --- NEW LOGIC: This watches for the exact moment the audio finishes playing ---
+  useEffect(() => {
+    if (prevIsPlaying.current && !isPlaying) {
+      if (state === 'anaya_speaking' && pendingTurnRef.current) {
+        const { transcript, turn, followUpCount, followUpUsedFor } = pendingTurnRef.current;
+        autoStartMic();
+        startTimeoutWatcher(transcript, turn, followUpCount, followUpUsedFor);
+        pendingTurnRef.current = null;
+      }
+    }
+    prevIsPlaying.current = isPlaying;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, state, autoStartMic]);
 
   useEffect(() => {
     if (!sessionId || hasStarted.current) return;
@@ -206,29 +320,24 @@ function InterviewContent() {
     sendToAnaya([], 0, 0, null);
   }, [sessionId, sendToAnaya]);
 
-  async function handleStartRecording() {
-    if (state !== 'waiting') return;
-    setState('listening');
-    setStatusMsg('Recording — speak now...');
-    startListening();
-  }
-
+  // Manual stop recording — sends response to Anaya
   async function handleStopRecording() {
     if (state !== 'listening') return;
+    clearTimeouts();
+    setTimeoutMsg('');
     setState('processing');
     setStatusMsg('Processing your response...');
     const spoken = await stopListening();
 
     if (!spoken || spoken.trim().length < 2) {
-      setStatusMsg("Didn't catch that — try again");
-      setState('waiting');
+      setStatusMsg("Didn't catch that — mic is on again");
+      // Re-enable mic if nothing was captured
+      await autoStartMic();
       return;
     }
 
     const entry: TranscriptEntry = {
-      role: 'candidate',
-      text: spoken,
-      timestamp: Date.now(),
+      role: 'candidate', text: spoken, timestamp: Date.now(),
     };
     const newTranscript = [...transcript, entry];
     setTranscript(newTranscript);
@@ -245,6 +354,39 @@ function InterviewContent() {
         position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
         background: 'radial-gradient(ellipse 50% 40% at 50% 0%, rgba(201,168,76,0.06) 0%, transparent 70%)',
       }} />
+
+      {/* Tab switch warning banner */}
+      {tabWarning && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 100,
+          background: 'rgba(248,113,113,0.95)',
+          backdropFilter: 'blur(8px)',
+          padding: '12px 24px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          animation: 'fade-in 0.3s ease',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 18 }}>⚠️</span>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 700, color: 'white', margin: 0 }}>
+                Tab switch detected
+              </p>
+              <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.85)', margin: 0 }}>
+                Please stay on this tab during the interview. This has been noted in your assessment.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setTabWarning(false)}
+            style={{
+              background: 'rgba(255,255,255,0.2)', border: 'none',
+              color: 'white', borderRadius: 8, padding: '6px 14px',
+              fontSize: 12, cursor: 'pointer', fontWeight: 600,
+            }}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Header */}
       <header style={{
@@ -320,6 +462,16 @@ function InterviewContent() {
                 {isFetching ? '● Thinking' : '▶ Speaking'}
               </div>
             )}
+            {isListening && (
+              <div style={{
+                fontSize: 11, color: '#4ade80',
+                padding: '4px 10px', borderRadius: 20,
+                border: '1px solid rgba(74,222,128,0.3)',
+                background: 'rgba(74,222,128,0.1)',
+              }}>
+                ● Listening
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
@@ -335,64 +487,69 @@ function InterviewContent() {
           </p>
         </div>
 
-        {/* Transcript — shows confirmed turns only, no live STT */}
+        {/* Transcript — Anaya only */}
         <div className="glass fade-up-2" style={{ borderRadius: 24, overflow: 'hidden' }}>
-          <div style={{
-            padding: '14px 20px', borderBottom: '1px solid var(--border)',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          }}>
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
             <span style={{
               fontSize: 11, fontWeight: 600, color: 'var(--white-40)',
               letterSpacing: '0.12em', textTransform: 'uppercase',
-            }}>Anaya's Questions</span>
+            }}>Anaya&apos;s Questions</span>
           </div>
 
           <div style={{
             padding: '16px', maxHeight: 280, overflowY: 'auto',
             display: 'flex', flexDirection: 'column', gap: 10,
           }}>
-            {transcript.length === 0 && (
+            {transcript.filter(e => e.role === 'anaya').length === 0 && (
               <p style={{
                 textAlign: 'center', color: 'var(--white-40)',
                 fontSize: 13, padding: '24px 0',
               }}>
-                The conversation will appear here...
+                Questions will appear here...
               </p>
             )}
 
             {transcript
-  .filter((entry) => entry.role === 'anaya')
-  .map((entry, i) => (
-    <div key={i} style={{
-      display: 'flex', flexDirection: 'row',
-      gap: 10, alignItems: 'flex-start',
-    }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-        background: 'linear-gradient(135deg, rgba(201,168,76,0.3), rgba(201,168,76,0.1))',
-        border: '1px solid rgba(201,168,76,0.3)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 11, fontWeight: 600, color: 'var(--gold)',
-      }}>A</div>
-      <div style={{
-        maxWidth: '85%', padding: '10px 14px',
-        fontSize: 13, lineHeight: 1.6,
-        background: 'rgba(201,168,76,0.07)',
-        border: '1px solid rgba(201,168,76,0.15)',
-        color: 'var(--white-70)',
-        borderRadius: '4px 14px 14px 14px',
-      }}>
-        {entry.text}
-      </div>
-    </div>
-  ))}
+              .filter((entry) => entry.role === 'anaya')
+              .map((entry, i) => (
+                <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <div style={{
+                    width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                    background: 'linear-gradient(135deg, rgba(201,168,76,0.3), rgba(201,168,76,0.1))',
+                    border: '1px solid rgba(201,168,76,0.3)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 11, fontWeight: 600, color: 'var(--gold)',
+                  }}>A</div>
+                  <div style={{
+                    maxWidth: '85%', padding: '10px 14px',
+                    fontSize: 13, lineHeight: 1.6,
+                    background: 'rgba(201,168,76,0.07)',
+                    border: '1px solid rgba(201,168,76,0.15)',
+                    color: 'var(--white-70)',
+                    borderRadius: '4px 14px 14px 14px',
+                  }}>
+                    {entry.text}
+                  </div>
+                </div>
+              ))}
 
-            {/* Show "recording..." indicator instead of raw STT */}
+            {/* Recording indicator */}
             {isListening && (
-              <div style={{
-                display: 'flex', flexDirection: 'row-reverse',
-                gap: 10, alignItems: 'center',
-              }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  padding: '8px 14px', borderRadius: '14px 4px 14px 14px',
+                  fontSize: 13, background: 'rgba(74,222,128,0.05)',
+                  border: '1px solid rgba(74,222,128,0.2)',
+                  color: '#4ade80',
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%',
+                    background: '#4ade80', display: 'inline-block',
+                    animation: 'pulse-record 1.4s ease-in-out infinite',
+                  }} />
+                  Recording...
+                </div>
                 <div style={{
                   width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
                   background: 'rgba(255,255,255,0.1)',
@@ -402,23 +559,6 @@ function InterviewContent() {
                 }}>
                   {(firstName[0] ?? 'C').toUpperCase()}
                 </div>
-                <div style={{
-                  padding: '10px 14px',
-                  borderRadius: '14px 4px 14px 14px',
-                  fontSize: 13,
-                  background: 'rgba(255,255,255,0.03)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--gold)',
-                  display: 'flex', alignItems: 'center', gap: 8,
-                }}>
-                  <span style={{
-                    width: 8, height: 8, borderRadius: '50%',
-                    background: 'var(--gold)',
-                    display: 'inline-block',
-                    animation: 'pulse-record 1.4s ease-in-out infinite',
-                  }} />
-                  Recording...
-                </div>
               </div>
             )}
 
@@ -426,7 +566,18 @@ function InterviewContent() {
           </div>
         </div>
 
-        {/* Mic control */}
+        {/* Timeout nudge */}
+        {timeoutMsg && (
+          <div className="fade-in" style={{
+            textAlign: 'center', padding: '10px 16px', borderRadius: 12,
+            background: 'rgba(201,168,76,0.06)',
+            border: '1px solid rgba(201,168,76,0.15)',
+          }}>
+            <p style={{ fontSize: 13, color: 'var(--gold)' }}>⏱ {timeoutMsg}</p>
+          </div>
+        )}
+
+        {/* Mic control — only stop button shown (mic auto-starts) */}
         {state !== 'complete' && (
           <div className="fade-up-3" style={{
             display: 'flex', flexDirection: 'column',
@@ -439,42 +590,14 @@ function InterviewContent() {
                   className="pulse-record"
                   style={{
                     width: 72, height: 72, borderRadius: '50%',
-                    background: 'linear-gradient(135deg, #c9a84c, #e8c96a)',
+                    background: 'linear-gradient(135deg, #4ade80, #22c55e)',
                     border: 'none', cursor: 'pointer',
                     display: 'flex', alignItems: 'center',
                     justifyContent: 'center', fontSize: 26,
                   }}>⏹</button>
-                <p style={{ fontSize: 12, color: 'var(--gold)' }}>
-                  Recording — tap when done
+                <p style={{ fontSize: 12, color: '#4ade80' }}>
+                  Tap to send your response
                 </p>
-              </>
-            ) : state === 'waiting' ? (
-              <>
-                <button
-                  onClick={handleStartRecording}
-                  style={{
-                    width: 72, height: 72, borderRadius: '50%',
-                    background: 'rgba(201,168,76,0.1)',
-                    border: '1px solid rgba(201,168,76,0.3)',
-                    cursor: 'pointer', transition: 'all 0.2s',
-                    display: 'flex', alignItems: 'center',
-                    justifyContent: 'center', fontSize: 26,
-                  }}
-                  onMouseEnter={e => {
-                    const btn = e.currentTarget as HTMLButtonElement;
-                    btn.style.background = 'rgba(201,168,76,0.2)';
-                    btn.style.borderColor = 'rgba(201,168,76,0.6)';
-                    btn.style.transform = 'scale(1.05)';
-                  }}
-                  onMouseLeave={e => {
-                    const btn = e.currentTarget as HTMLButtonElement;
-                    btn.style.background = 'rgba(201,168,76,0.1)';
-                    btn.style.borderColor = 'rgba(201,168,76,0.3)';
-                    btn.style.transform = 'scale(1)';
-                  }}>
-                  🎙️
-                </button>
-                <p style={{ fontSize: 12, color: 'var(--white-40)' }}>Tap to respond</p>
               </>
             ) : (
               <div style={{

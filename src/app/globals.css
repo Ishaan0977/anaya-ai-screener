@@ -113,6 +113,11 @@ h1, h2, h3 {
 }
 
 /* Animations */
+@keyframes grow-bar {
+  from { width: 0%; }
+  to   { width: 100%; }
+}
+
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(20px); }
   to   { opacity: 1; transform: translateY(0); }

@@ -17,6 +17,14 @@ type Assessment = {
   scores: DimensionScore[];
   red_flags: string[];
   standout_moments: string[];
+  tone_badge: string;
+  tone_description: string;
+  integrity_signals?: {
+  tabSwitches: number;
+  longPauses: number;
+  fastResponses: number;
+  avgResponseStartMs: number;
+};
 };
 type SessionData = {
   candidate_name: string;
@@ -203,6 +211,32 @@ export default function ReportPage() {
           </div>
         </div>
 
+	{/* Tone badge */}
+{a.tone_badge && (
+  <div style={{
+    marginTop: 12, display: 'flex', alignItems: 'center', gap: 12,
+  }}>
+    <div style={{
+      padding: '8px 16px', borderRadius: 20,
+      background: 'rgba(201,168,76,0.1)',
+      border: '1px solid rgba(201,168,76,0.25)',
+      display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <span style={{ fontSize: 16 }}>
+        {{'Empathetic':'💚','Structured':'📐','Enthusiastic':'⚡',
+          'Reserved':'🤫','Analytical':'🔬','Nurturing':'🌱',
+          'Confident':'💪','Methodical':'🗂️'}[a.tone_badge] ?? '🎯'}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--gold)' }}>
+        {a.tone_badge}
+      </span>
+    </div>
+    <span style={{ fontSize: 12, color: 'var(--white-40)' }}>
+      {a.tone_description}
+    </span>
+  </div>
+)}
+
         {/* Dimension scores */}
         <div className="glass fade-up-2" style={{ borderRadius: 24, overflow: 'hidden' }}>
           <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--border)' }}>
@@ -262,7 +296,68 @@ export default function ReportPage() {
             </div>
           )}
         </div>
-
+	{a.integrity_signals && (
+  <div className="glass fade-up-4" style={{ borderRadius: 20, padding: '20px 24px' }}>
+    <h2 style={{
+      fontSize: 13, fontWeight: 600, color: 'var(--white-40)',
+      letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 16,
+    }}>
+      🔍 Interview Integrity
+    </h2>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+      {[
+        {
+          label: 'Tab switches',
+          value: a.integrity_signals.tabSwitches,
+          flag: a.integrity_signals.tabSwitches > 2,
+          note: 'Times candidate switched away from this tab',
+        },
+        {
+          label: 'Avg. response time',
+          value: `${(a.integrity_signals.avgResponseStartMs / 1000).toFixed(1)}s`,
+          flag: false,
+          note: 'Average time before starting to speak',
+        },
+        {
+          label: 'Very fast responses',
+          value: a.integrity_signals.fastResponses,
+          flag: a.integrity_signals.fastResponses > 1,
+          note: 'Responses started within 2 seconds',
+        },
+        {
+          label: 'Long pauses',
+          value: a.integrity_signals.longPauses,
+          flag: a.integrity_signals.longPauses > 1,
+          note: 'Questions with >30s delay before responding',
+        },
+      ].map(item => (
+        <div key={item.label} style={{
+          padding: '12px 14px', borderRadius: 12,
+          background: item.flag ? 'rgba(248,113,113,0.06)' : 'rgba(255,255,255,0.03)',
+          border: `1px solid ${item.flag ? 'rgba(248,113,113,0.2)' : 'var(--border)'}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontSize: 12, color: 'var(--white-40)' }}>{item.label}</span>
+            <span style={{
+              fontSize: 15, fontWeight: 700,
+              color: item.flag ? '#f87171' : 'var(--white)',
+            }}>{item.value}</span>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--white-40)', lineHeight: 1.4 }}>{item.note}</p>
+        </div>
+      ))}
+    </div>
+    {(a.integrity_signals.tabSwitches > 2 || a.integrity_signals.fastResponses > 1) && (
+      <p style={{
+        fontSize: 12, color: '#f87171', marginTop: 12,
+        padding: '8px 12px', borderRadius: 8,
+        background: 'rgba(248,113,113,0.06)',
+      }}>
+        ⚠ Some signals warrant a closer look. Consider a follow-up call.
+      </p>
+    )}
+  </div>
+)}
         {/* Closing */}
         <div className="fade-up-4" style={{
           borderRadius: 24, padding: '32px', textAlign: 'center',

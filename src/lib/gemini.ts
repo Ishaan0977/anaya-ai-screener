@@ -5,6 +5,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 // Chat model
 export const geminiModel = genAI.getGenerativeModel({
   model: 'gemini-2.0-flash',
+	  //'gemini-2.0-flash',
   generationConfig: {
     temperature: 0.85,
     topP: 0.95,
@@ -14,10 +15,12 @@ export const geminiModel = genAI.getGenerativeModel({
 
 // Assessment model
 export const assessmentModel = genAI.getGenerativeModel({
-  model: 'gemini-2.0-flash',
+  model: 'gemini-2.5-pro',
   generationConfig: {
     temperature: 0.2,
-    maxOutputTokens: 900,
+    // 1. Force the model to output strict, valid JSON (no markdown backticks)
+    responseMimeType: "application/json",
+    maxOutputTokens: 2048,
   },
 });
 
@@ -28,7 +31,7 @@ You conduct short screening interviews with tutor candidates.
 YOUR ROLE IS TO INTERVIEW — NOT TO COACH OR EVALUATE OUT LOUD.
 
 ACKNOWLEDGMENT — keep it to 3-5 words max, then move on:
-Good neutral phrases: "Got it.", "Makes sense.", "Okay, noted.", "Thanks for that.", "Understood."
+Good neutral phrases: "Got it.", "Makes sense.", "Okay, noted.", "Thanks for that.", "Understood." then ask the follow up or main question along with the starting phrases
 NEVER say: "Great answer!", "Excellent!", "That's a great approach", "You should...", "One thing to consider..."
 NEVER give feedback, advice, or suggestions.
 
@@ -112,18 +115,19 @@ They mentioned something specific. Ask ONE natural follow-up question that digs 
   }
 
   // Move to next main question
+  // Move to next main question
   switch (currentMainQuestion) {
     case 0:
       return `Ask Q1 — a warm, fresh question about ${firstName}'s teaching background and what draws them to children. Generate it freshly each time. Under 35 words.`;
 
     case 1:
-      return `Give a 3-word neutral acknowledgment of what ${firstName} said. Then immediately ask Q2 — a specific vivid scenario: a student is struggling or shutting down. Make it concrete and fresh. Total under 55 words.`;
+      return `In a single response, give a brief 3-word neutral acknowledgment of what ${firstName} said, and immediately ask Q2: a specific vivid scenario where a student is struggling or shutting down. Make it concrete and fresh. Total under 55 words.`;
 
     case 2:
-      return `Give a 3-word neutral acknowledgment. Then ask Q3 — tell ${firstName} to explain a math concept RIGHT NOW as if you are a 9-year-old. Pick a concept (fractions, decimals, negative numbers, multiplication, place value — vary it). Say something like "Okay, I'm your student now — go ahead." Under 55 words.`;
+      return `In a single response, give a brief 3-word neutral acknowledgment, and immediately ask Q3: tell ${firstName} to explain a math concept RIGHT NOW as if you are a 9-year-old. Pick a concept (fractions, decimals, negative numbers, multiplication, place value). Say something like "Okay, I'm your student now — go ahead." Under 55 words.`;
 
     case 3:
-      return `Give a 3-word neutral acknowledgment. Then ask Q4 — a fresh emotional or behavioral scenario, different from Q2. Options: child cries from frustration, says they understand but gets it wrong, refuses to continue, parent interrupts aggressively. Pick one and make it vivid. Under 55 words.`;
+      return `In a single response, give a brief 3-word neutral acknowledgment, and immediately ask Q4: a fresh emotional or behavioral scenario, different from Q2. Options: child cries from frustration, says they understand but gets it wrong, refuses to continue, parent interrupts aggressively. Pick one and make it vivid. Under 55 words.`;
 
     case 4:
       return `Interview complete. Thank ${firstName} warmly by name. Tell them Cuemath's team will be in touch within 2 business days. Genuine, brief, no feedback on answers. Under 40 words.`;
@@ -138,7 +142,7 @@ export function buildAssessmentPrompt(
   candidateAnswers: string[]
 ): string {
   const answers = candidateAnswers
-    .map((a, i) => `A${i + 1}: ${a.slice(0, 300)}`) // Cap each answer to save tokens
+    .map((a, i) => `A${i + 1}: ${a.slice(0, 300)}`)
     .join('\n');
 
   return `Evaluate tutor candidate ${candidateName} for Cuemath.
@@ -147,9 +151,11 @@ ANSWERS:
 ${answers}
 
 Return ONLY valid JSON, no markdown, no extra text:
-{"verdict":"Hold","verdict_reason":"Brief reason under 60 chars","overall_score":3.2,"scores":[{"dimension":"Communication Clarity","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Warmth & Patience","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Ability to Simplify","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"English Fluency","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Adaptability","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"}],"red_flags":["concern if any"],"standout_moments":["best moment"]}
+{"verdict":"Hold","verdict_reason":"Brief reason under 60 chars","overall_score":3.2,"tone_badge":"Empathetic","tone_description":"Speaks with warmth and genuine care for students","scores":[{"dimension":"Communication Clarity","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Warmth & Patience","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Ability to Simplify","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"English Fluency","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Adaptability","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"}],"red_flags":["concern if any"],"standout_moments":["best moment"]}
 
 SCORING 1-5: 5=Exceptional 4=Strong 3=Adequate 2=Weak 1=Poor
 VERDICT: Hire>=4.0 no dim<3 | Hold=3.0-3.9 or one dim<3 | Pass<3.0 or two+ dims<3
-Replace placeholder values with real ones. Keep all strings SHORT.`;
+tone_badge: Pick ONE word from: Empathetic, Structured, Enthusiastic, Reserved, Analytical, Nurturing, Confident, Methodical
+tone_description: One sentence, max 60 chars
+Replace all placeholder values with real ones. Keep all strings SHORT.`;
 }
