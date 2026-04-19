@@ -185,36 +185,4 @@ src/
 
 ---
 
-## 📱 LinkedIn Caption
-
-```text
-🎙️ Built an AI voice interviewer that conducts real screening interviews.
-
-→ Adaptive questioning
-→ Instant scoring
-→ Voice-first UX
-
-Tech:
-Gemini + Groq fallback
-ElevenLabs voice
-Whisper STT
-Next.js fullstack
-
-Live: https://anaya-ai-screener.vercel.app/
-
-#ai #ml #nextjs #voiceai #buildinpublic
-```
-
-```
-
----
-
-If you want a **stronger recruiter-focused README (Tier-1 level)**, I can tighten this further with:
-- impact metrics section
-- system design diagram (real one, not simplified)
-- latency benchmarks
-- failure handling explanation (interview gold)
-
-Just say.
-```
 
