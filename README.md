@@ -1,8 +1,3 @@
-Here’s your **clean, single `README.md` file** with your actual live link already replaced and polished. Just copy-paste this directly into your repo:
-
----
-
-````markdown
 # Anaya — Voice AI Interviewer
 
 > An end-to-end AI voice screening system. Candidates have a natural spoken conversation with an AI interviewer. HR gets a structured assessment report with scores, evidence quotes, and a hire/hold/pass verdict — instantly, automatically, at any scale.
