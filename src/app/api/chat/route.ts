@@ -1,36 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import {
-  geminiModel,
   ANAYA_SYSTEM_PROMPT,
   buildConversationHistory,
   buildNextTurnInstruction,
+  chatWithFallback,
 } from '@/lib/gemini';
-
-async function chatWithRetry(
-  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
-  instruction: string,
-  maxRetries = 3
-): Promise<string> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      const chat = geminiModel.startChat({ history });
-      const result = await chat.sendMessage(instruction);
-      return result.response.text().trim();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      const is429 = msg.includes('429') || msg.includes('quota') || msg.includes('Too Many Requests');
-      if (is429 && attempt < maxRetries - 1) {
-        const wait = (attempt + 1) * 15000;
-        console.log(`Chat rate limited. Waiting ${wait / 1000}s...`);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
 
 function getCurrentMainQuestion(candidateTurns: number, followUpCount: number): number {
   return candidateTurns - followUpCount;
@@ -51,6 +26,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // ── Turn 0: static welcome, no LLM needed ──
     if (turn_index === 0) {
       const opening = `Hi there! I'm Anaya from Cuemath's talent team — thanks for making time today. This will be a relaxed ten-minute conversation to get to know you better. No trick questions — just be yourself. Shall we begin?`;
       await supabaseAdmin.from('transcript_entries').insert({
@@ -106,7 +82,8 @@ export async function POST(req: NextRequest) {
       ...conversationHistory,
     ];
 
-    const anayaResponse = await chatWithRetry(history, instruction);
+    // Gemini with automatic Groq fallback
+    const anayaResponse = await chatWithFallback(history, instruction);
 
     await supabaseAdmin.from('transcript_entries').insert({
       session_id, role: 'anaya', text: anayaResponse,

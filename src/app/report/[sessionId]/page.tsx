@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -10,6 +10,14 @@ type DimensionScore = {
   evidence_quote: string;
   notes: string;
 };
+
+type IntegritySignals = {
+  tabSwitches?: number;
+  longPauses?: number;
+  fastResponses?: number;
+  avgResponseStartMs?: number;
+};
+
 type Assessment = {
   verdict: 'Hire' | 'Hold' | 'Pass';
   verdict_reason: string;
@@ -17,15 +25,11 @@ type Assessment = {
   scores: DimensionScore[];
   red_flags: string[];
   standout_moments: string[];
-  tone_badge: string;
-  tone_description: string;
-  integrity_signals?: {
-  tabSwitches: number;
-  longPauses: number;
-  fastResponses: number;
-  avgResponseStartMs: number;
+  tone_badge?: string;
+  tone_description?: string;
+  integrity_signals?: IntegritySignals;
 };
-};
+
 type SessionData = {
   candidate_name: string;
   candidate_email: string;
@@ -34,9 +38,9 @@ type SessionData = {
 };
 
 const VERDICTS = {
-  Hire:  { color: '#4ade80', bg: 'rgba(74,222,128,0.1)',  border: 'rgba(74,222,128,0.25)',  label: '✓ Recommend · Move to Next Round' },
-  Hold:  { color: '#fbbf24', bg: 'rgba(251,191,36,0.1)',  border: 'rgba(251,191,36,0.25)',  label: '◎ Hold · Further Review Needed' },
-  Pass:  { color: '#f87171', bg: 'rgba(248,113,113,0.1)', border: 'rgba(248,113,113,0.25)', label: '✕ Pass · Not Recommended' },
+  Hire: { color: '#4ade80', bg: 'rgba(74,222,128,0.1)',  border: 'rgba(74,222,128,0.25)', label: '✓ Recommend · Move to Next Round' },
+  Hold: { color: '#fbbf24', bg: 'rgba(251,191,36,0.1)',  border: 'rgba(251,191,36,0.25)', label: '◎ Hold · Further Review Needed' },
+  Pass: { color: '#f87171', bg: 'rgba(248,113,113,0.1)', border: 'rgba(248,113,113,0.25)', label: '✕ Pass · Not Recommended' },
 };
 
 function ScoreBar({ score }: { score: number }) {
@@ -48,7 +52,6 @@ function ScoreBar({ score }: { score: number }) {
           <div key={i} style={{
             width: 18, height: 18, borderRadius: 4,
             background: i <= score ? color : 'rgba(255,255,255,0.08)',
-            transition: 'background 0.3s',
           }} />
         ))}
       </div>
@@ -63,20 +66,64 @@ export default function ReportPage() {
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(true);
   const [retries, setRetries] = useState(0);
+  const [isFallback, setIsFallback] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenError, setRegenError] = useState('');
 
-  useEffect(() => {
-    async function load() {
-      const res = await fetch(`/api/session?id=${sessionId}`);
-      const json = await res.json();
-      if (!json.assessment && retries < 8) {
-        setTimeout(() => setRetries(r => r + 1), 3000);
+  const loadSession = useCallback(async () => {
+    const res = await fetch(`/api/session?id=${sessionId}`);
+    const json = await res.json();
+    if (!json.assessment && retries < 8) {
+      setTimeout(() => setRetries(r => r + 1), 3000);
+      return;
+    }
+
+    // Detect fallback assessment (manual review note in red_flags)
+    const isFallbackAssessment =
+      json.assessment?.red_flags?.some((f: string) =>
+        f.toLowerCase().includes('manual review') || f.toLowerCase().includes('automated assessment incomplete')
+      ) ?? false;
+
+    setIsFallback(isFallbackAssessment);
+    setData(json);
+    setLoading(false);
+  }, [sessionId, retries]);
+
+  useEffect(() => { loadSession(); }, [loadSession]);
+
+  async function handleRegenerate() {
+    setRegenerating(true);
+    setRegenError('');
+    try {
+      const res = await fetch('/api/assess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      const result = await res.json();
+
+      if (result.fallback) {
+        setRegenError('AI providers are currently busy. Please try again in a moment.');
+        setRegenerating(false);
         return;
       }
-      setData(json);
-      setLoading(false);
+
+      if (result.success) {
+        // Reload session data
+        setLoading(true);
+        setRetries(0);
+        const sessionRes = await fetch(`/api/session?id=${sessionId}`);
+        const sessionJson = await sessionRes.json();
+        setData(sessionJson);
+        setIsFallback(false);
+        setLoading(false);
+      }
+    } catch {
+      setRegenError('Something went wrong. Please try again.');
+    } finally {
+      setRegenerating(false);
     }
-    load();
-  }, [sessionId, retries]);
+  }
 
   function downloadPDF() {
     if (!data?.assessment) return;
@@ -85,7 +132,7 @@ export default function ReportPage() {
 
     doc.setFontSize(22);
     doc.setTextColor(15, 76, 92);
-    doc.text('Cuemath Tutor Screening Report', 14, 20);
+    doc.text('Tutor Screening Report', 14, 20);
     doc.setFontSize(10);
     doc.setTextColor(100);
     doc.text(`Candidate: ${candidate_name} (${candidate_email})`, 14, 30);
@@ -111,14 +158,8 @@ export default function ReportPage() {
       doc.setFontSize(9); doc.setTextColor(60);
       a.standout_moments.forEach((m, i) => doc.text(`• ${m}`, 14, finalY + 8 + i * 7));
     }
-    if (a.red_flags?.some(Boolean)) {
-      doc.setFontSize(11); doc.setTextColor(220, 38, 38);
-      doc.text('Red Flags', 14, finalY + 30);
-      doc.setFontSize(9); doc.setTextColor(60);
-      a.red_flags.filter(Boolean).forEach((f, i) => doc.text(`• ${f}`, 14, finalY + 38 + i * 7));
-    }
 
-    doc.save(`cuemath-${candidate_name.replace(/\s+/g, '-').toLowerCase()}.pdf`);
+    doc.save(`report-${candidate_name.replace(/\s+/g, '-').toLowerCase()}.pdf`);
   }
 
   if (loading) return (
@@ -129,18 +170,22 @@ export default function ReportPage() {
         borderTopColor: 'var(--gold)',
         animation: 'spin-slow 0.8s linear infinite',
       }} />
-      <p style={{ fontSize: 14, color: 'var(--white-40)' }}>Anaya is reviewing your interview...</p>
+      <p style={{ fontSize: 14, color: 'var(--white-40)' }}>Generating your assessment report...</p>
     </div>
   );
 
   if (!data?.assessment) return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <p style={{ color: 'var(--white-40)', fontSize: 14 }}>Report not available yet. Please wait a moment and refresh.</p>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+      <p style={{ color: 'var(--white-40)', fontSize: 14 }}>Report not available yet.</p>
+      <button onClick={() => { setLoading(true); setRetries(0); }} className="btn-gold"
+        style={{ padding: '10px 24px', borderRadius: 12, fontSize: 13 }}>
+        Retry
+      </button>
     </div>
   );
 
   const { assessment: a, candidate_name, candidate_email, started_at } = data;
-  const vs = VERDICTS[a.verdict];
+  const vs = VERDICTS[a.verdict] ?? VERDICTS['Hold'];
 
   return (
     <div style={{ minHeight: '100vh', position: 'relative', zIndex: 1 }}>
@@ -149,6 +194,7 @@ export default function ReportPage() {
         background: 'radial-gradient(ellipse 60% 40% at 50% 0%, rgba(201,168,76,0.05) 0%, transparent 70%)',
       }} />
 
+      {/* Header */}
       <header style={{
         position: 'sticky', top: 0, zIndex: 10,
         padding: '16px 32px',
@@ -166,16 +212,48 @@ export default function ReportPage() {
           <span style={{ fontWeight: 600, fontSize: 14, letterSpacing: '0.08em' }}>CUEMATH</span>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={downloadPDF} className="btn-ghost" style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
+          <button onClick={downloadPDF} className="btn-ghost"
+            style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
             ↓ PDF Report
           </button>
-          <button onClick={() => router.push('/dashboard')} className="btn-gold" style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
+          <button onClick={() => router.push('/dashboard')} className="btn-gold"
+            style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
             HR Dashboard →
           </button>
         </div>
       </header>
 
       <main style={{ position: 'relative', zIndex: 2, maxWidth: 720, margin: '0 auto', padding: '36px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+        {/* Fallback / Regenerate banner */}
+        {isFallback && (
+          <div style={{
+            borderRadius: 16, padding: '16px 20px',
+            background: 'rgba(251,191,36,0.08)',
+            border: '1px solid rgba(251,191,36,0.25)',
+            display: 'flex', alignItems: 'center',
+            justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
+          }}>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 600, color: '#fbbf24', marginBottom: 4 }}>
+                ⚠ Report generation was incomplete
+              </p>
+              <p style={{ fontSize: 12, color: 'var(--white-40)' }}>
+                The AI assessment could not be fully generated. You can regenerate it or review the transcript manually.
+              </p>
+              {regenError && (
+                <p style={{ fontSize: 12, color: 'var(--danger)', marginTop: 6 }}>{regenError}</p>
+              )}
+            </div>
+            <button
+              onClick={handleRegenerate}
+              disabled={regenerating}
+              className="btn-gold"
+              style={{ padding: '10px 20px', borderRadius: 10, fontSize: 13, opacity: regenerating ? 0.6 : 1 }}>
+              {regenerating ? '⏳ Regenerating...' : '↻ Regenerate Report'}
+            </button>
+          </div>
+        )}
 
         {/* Hero card */}
         <div className="glass fade-up" style={{ borderRadius: 24, padding: '32px 28px' }}>
@@ -202,40 +280,33 @@ export default function ReportPage() {
           </div>
 
           {/* Verdict */}
-          <div style={{
-            padding: '14px 18px', borderRadius: 14,
-            background: vs.bg, border: `1px solid ${vs.border}`,
-          }}>
+          <div style={{ padding: '14px 18px', borderRadius: 14, background: vs.bg, border: `1px solid ${vs.border}` }}>
             <p style={{ fontWeight: 700, fontSize: 14, color: vs.color, marginBottom: 4 }}>{vs.label}</p>
             <p style={{ fontSize: 13, color: 'var(--white-70)' }}>{a.verdict_reason}</p>
           </div>
-        </div>
 
-	{/* Tone badge */}
-{a.tone_badge && (
-  <div style={{
-    marginTop: 12, display: 'flex', alignItems: 'center', gap: 12,
-  }}>
-    <div style={{
-      padding: '8px 16px', borderRadius: 20,
-      background: 'rgba(201,168,76,0.1)',
-      border: '1px solid rgba(201,168,76,0.25)',
-      display: 'flex', alignItems: 'center', gap: 8,
-    }}>
-      <span style={{ fontSize: 16 }}>
-        {{'Empathetic':'💚','Structured':'📐','Enthusiastic':'⚡',
-          'Reserved':'🤫','Analytical':'🔬','Nurturing':'🌱',
-          'Confident':'💪','Methodical':'🗂️'}[a.tone_badge] ?? '🎯'}
-      </span>
-      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--gold)' }}>
-        {a.tone_badge}
-      </span>
-    </div>
-    <span style={{ fontSize: 12, color: 'var(--white-40)' }}>
-      {a.tone_description}
-    </span>
-  </div>
-)}
+          {/* Tone badge */}
+          {a.tone_badge && (
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{
+                padding: '8px 16px', borderRadius: 20,
+                background: 'rgba(201,168,76,0.1)',
+                border: '1px solid rgba(201,168,76,0.25)',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <span style={{ fontSize: 16 }}>
+                  {({'Empathetic':'💚','Structured':'📐','Enthusiastic':'⚡',
+                    'Reserved':'🤫','Analytical':'🔬','Nurturing':'🌱',
+                    'Confident':'💪','Methodical':'🗂️'} as Record<string, string>)[a.tone_badge] ?? '🎯'}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--gold)' }}>{a.tone_badge}</span>
+              </div>
+              {a.tone_description && (
+                <span style={{ fontSize: 12, color: 'var(--white-40)' }}>{a.tone_description}</span>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Dimension scores */}
         <div className="glass fade-up-2" style={{ borderRadius: 24, overflow: 'hidden' }}>
@@ -289,75 +360,43 @@ export default function ReportPage() {
                 ⚠ RED FLAGS
               </h2>
               {a.red_flags.filter(Boolean).map((f, i) => (
-                <p key={i} style={{ fontSize: 13, color: 'var(--white-70)', lineHeight: 1.6, marginBottom: 8 }}>
-                  · {f}
-                </p>
+                <p key={i} style={{ fontSize: 13, color: 'var(--white-70)', lineHeight: 1.6, marginBottom: 8 }}>· {f}</p>
               ))}
             </div>
           )}
         </div>
-	{a.integrity_signals && (
-  <div className="glass fade-up-4" style={{ borderRadius: 20, padding: '20px 24px' }}>
-    <h2 style={{
-      fontSize: 13, fontWeight: 600, color: 'var(--white-40)',
-      letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 16,
-    }}>
-      🔍 Interview Integrity
-    </h2>
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
-      {[
-        {
-          label: 'Tab switches',
-          value: a.integrity_signals.tabSwitches,
-          flag: a.integrity_signals.tabSwitches > 2,
-          note: 'Times candidate switched away from this tab',
-        },
-        {
-          label: 'Avg. response time',
-          value: `${(a.integrity_signals.avgResponseStartMs / 1000).toFixed(1)}s`,
-          flag: false,
-          note: 'Average time before starting to speak',
-        },
-        {
-          label: 'Very fast responses',
-          value: a.integrity_signals.fastResponses,
-          flag: a.integrity_signals.fastResponses > 1,
-          note: 'Responses started within 2 seconds',
-        },
-        {
-          label: 'Long pauses',
-          value: a.integrity_signals.longPauses,
-          flag: a.integrity_signals.longPauses > 1,
-          note: 'Questions with >30s delay before responding',
-        },
-      ].map(item => (
-        <div key={item.label} style={{
-          padding: '12px 14px', borderRadius: 12,
-          background: item.flag ? 'rgba(248,113,113,0.06)' : 'rgba(255,255,255,0.03)',
-          border: `1px solid ${item.flag ? 'rgba(248,113,113,0.2)' : 'var(--border)'}`,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontSize: 12, color: 'var(--white-40)' }}>{item.label}</span>
-            <span style={{
-              fontSize: 15, fontWeight: 700,
-              color: item.flag ? '#f87171' : 'var(--white)',
-            }}>{item.value}</span>
+
+        {/* Integrity signals */}
+        {a.integrity_signals && (
+          <div className="glass fade-up-4" style={{ borderRadius: 20, padding: '20px 24px' }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--white-40)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 16 }}>
+              🔍 Interview Integrity
+            </h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+              {[
+                { label: 'Tab switches', value: a.integrity_signals.tabSwitches ?? 0, flag: (a.integrity_signals.tabSwitches ?? 0) > 2, note: 'Times candidate left this tab' },
+                { label: 'Avg response time', value: `${((a.integrity_signals.avgResponseStartMs ?? 0) / 1000).toFixed(1)}s`, flag: false, note: 'Average time before speaking' },
+                { label: 'Fast responses', value: a.integrity_signals.fastResponses ?? 0, flag: (a.integrity_signals.fastResponses ?? 0) > 1, note: 'Responses started within 2s' },
+                { label: 'Long pauses', value: a.integrity_signals.longPauses ?? 0, flag: (a.integrity_signals.longPauses ?? 0) > 1, note: 'Questions with >30s delay' },
+              ].map(item => (
+                <div key={item.label} style={{
+                  padding: '12px 14px', borderRadius: 12,
+                  background: item.flag ? 'rgba(248,113,113,0.06)' : 'rgba(255,255,255,0.03)',
+                  border: `1px solid ${item.flag ? 'rgba(248,113,113,0.2)' : 'var(--border)'}`,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--white-40)' }}>{item.label}</span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: item.flag ? '#f87171' : 'var(--white)' }}>
+                      {item.value}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--white-40)', lineHeight: 1.4 }}>{item.note}</p>
+                </div>
+              ))}
+            </div>
           </div>
-          <p style={{ fontSize: 11, color: 'var(--white-40)', lineHeight: 1.4 }}>{item.note}</p>
-        </div>
-      ))}
-    </div>
-    {(a.integrity_signals.tabSwitches > 2 || a.integrity_signals.fastResponses > 1) && (
-      <p style={{
-        fontSize: 12, color: '#f87171', marginTop: 12,
-        padding: '8px 12px', borderRadius: 8,
-        background: 'rgba(248,113,113,0.06)',
-      }}>
-        ⚠ Some signals warrant a closer look. Consider a follow-up call.
-      </p>
-    )}
-  </div>
-)}
+        )}
+
         {/* Closing */}
         <div className="fade-up-4" style={{
           borderRadius: 24, padding: '32px', textAlign: 'center',

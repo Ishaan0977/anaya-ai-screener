@@ -1,11 +1,11 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 
+// ── Gemini setup ──────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// Chat model
 export const geminiModel = genAI.getGenerativeModel({
-  model: 'gemini-2.0-flash',
-	  //'gemini-2.0-flash',
+  model: 'gemini-3.1-flash-lite-preview',
   generationConfig: {
     temperature: 0.85,
     topP: 0.95,
@@ -13,16 +13,132 @@ export const geminiModel = genAI.getGenerativeModel({
   },
 });
 
-// Assessment model
 export const assessmentModel = genAI.getGenerativeModel({
-  model: 'gemini-2.5-pro',
+  model: 'gemini-3-flash-preview',
   generationConfig: {
     temperature: 0.2,
-    // 1. Force the model to output strict, valid JSON (no markdown backticks)
-    responseMimeType: "application/json",
+    responseMimeType: 'application/json',
     maxOutputTokens: 2048,
   },
 });
+
+// ── Groq setup (fallback) ─────────────────────────────────────
+const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GROQ_CHAT_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_ASSESS_MODEL = 'llama-3.3-70b-versatile';
+
+// ── Should we fall back to Groq? ─────────────────────────────
+// Catches 429 rate limits, 503 overload, 404 model not found,
+// network errors, and anything else Gemini throws
+function shouldFallbackToGroq(err: unknown): boolean {
+  if (!(err instanceof Error)) return true; // unknown error → fallback
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('503') ||
+    msg.includes('502') ||
+    msg.includes('500') ||
+    msg.includes('quota') ||
+    msg.includes('too many requests') ||
+    msg.includes('rate limit') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('service unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('overloaded') ||
+    msg.includes('not found') ||
+    msg.includes('unavailable') ||
+    msg.includes('timeout') ||
+    msg.includes('fetch failed')
+  );
+}
+
+// ── Helper: convert Gemini history → Groq/OpenAI format ──────
+function convertHistoryToGroq(
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
+  finalInstruction: string
+): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
+  for (const turn of history) {
+    const content = turn.parts.map(p => p.text).join('\n');
+    messages.push({
+      role: turn.role === 'model' ? 'assistant' : 'user',
+      content,
+    });
+  }
+  messages.push({ role: 'user', content: finalInstruction });
+  return messages;
+}
+
+// ─────────────────────────────────────────────────────────────
+// CHAT: Try Gemini once → instantly fall back to Groq on ANY error
+// ─────────────────────────────────────────────────────────────
+export async function chatWithFallback(
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
+  instruction: string
+): Promise<string> {
+  // Try Gemini — ONE attempt only
+  try {
+    const chat = geminiModel.startChat({ history });
+    const result = await chat.sendMessage(instruction);
+    return result.response.text().trim();
+  } catch (err) {
+    if (shouldFallbackToGroq(err)) {
+      console.log(`Gemini failed (${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}). Switching to Groq instantly...`);
+    } else {
+      // Something we don't want to silently swallow (e.g. bad API key config)
+      throw err;
+    }
+  }
+
+  // Groq fallback
+  const groqMessages = convertHistoryToGroq(history, instruction);
+  const response = await groqClient.chat.completions.create({
+    model: GROQ_CHAT_MODEL,
+    messages: groqMessages,
+    max_tokens: 150,
+    temperature: 0.85,
+  });
+  const text = response.choices[0]?.message?.content?.trim() ?? '';
+  console.log('Groq chat fallback succeeded.');
+  return text;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ASSESSMENT: Try Gemini once → instantly fall back to Groq
+// ─────────────────────────────────────────────────────────────
+export async function assessWithFallback(prompt: string): Promise<string> {
+  // Try Gemini — ONE attempt only
+  try {
+    const result = await assessmentModel.generateContent(prompt);
+    return result.response.text().trim();
+  } catch (err) {
+    if (shouldFallbackToGroq(err)) {
+      console.log(`Gemini assess failed (${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}). Switching to Groq instantly...`);
+    } else {
+      throw err;
+    }
+  }
+
+  // Groq fallback — append JSON instruction since Groq ignores responseMimeType
+  const groqPrompt = prompt +
+    '\n\nIMPORTANT: Return ONLY the raw JSON object. No markdown, no backticks, no explanation. Start with { and end with }.';
+
+  const response = await groqClient.chat.completions.create({
+    model: GROQ_ASSESS_MODEL,
+    messages: [{ role: 'user', content: groqPrompt }],
+    max_tokens: 2048,
+    temperature: 0.2,
+    response_format: { type: 'json_object' },
+  });
+
+  const text = response.choices[0]?.message?.content?.trim() ?? '';
+  console.log('Groq assessment fallback succeeded.');
+  return text;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ALL EXISTING EXPORTS — unchanged
+// ─────────────────────────────────────────────────────────────
 
 export const ANAYA_SYSTEM_PROMPT = `
 You are Anaya, a warm interviewer at Cuemath — India's leading math tutoring company.
@@ -75,14 +191,6 @@ export function buildConversationHistory(
   }));
 }
 
-// Detect if last answer warrants a follow-up
-function shouldFollowUp(text: string): boolean {
-  const wordCount = text.trim().split(/\s+/).length;
-  // Too short — definitely probe
-  if (wordCount < 12) return true;
-  return false;
-}
-
 export function buildNextTurnInstruction(
   candidateName: string,
   candidateTurns: number,
@@ -93,29 +201,24 @@ export function buildNextTurnInstruction(
   const firstName = candidateName.split(' ')[0];
   const wordCount = lastCandidateText.trim().split(/\s+/).length;
   const tooShort = wordCount < 12;
-
-  // If we haven't used our follow-up for this main question yet
   const canFollowUp = followUpUsedForQuestion !== currentMainQuestion;
 
-  // Always probe if too short and we can follow up
   if (tooShort && canFollowUp && candidateTurns > 0 && currentMainQuestion <= 4) {
     return `${firstName} gave a very brief answer: "${lastCandidateText}".
 Ask them to elaborate more specifically. Vary your wording each time. Under 20 words. Do NOT move to the next main question yet.`;
   }
 
-  // For Q1, Q2, Q4 answers — check if follow-up is warranted by content
-  const interestingAnswer = lastCandidateText.length > 80 &&
+  const interestingAnswer =
+    lastCandidateText.length > 80 &&
     canFollowUp &&
     currentMainQuestion > 0 &&
-    currentMainQuestion < 4; // Don't follow up after simplification or closing
+    currentMainQuestion < 4;
 
   if (interestingAnswer && currentMainQuestion >= 1 && currentMainQuestion <= 2) {
     return `${firstName} said: "${lastCandidateText.slice(0, 200)}".
 They mentioned something specific. Ask ONE natural follow-up question that digs deeper into what they said — reference their actual words. Make it feel conversational, not interrogative. Under 30 words. Do NOT move to the next main question yet.`;
   }
 
-  // Move to next main question
-  // Move to next main question
   switch (currentMainQuestion) {
     case 0:
       return `Ask Q1 — a warm, fresh question about ${firstName}'s teaching background and what draws them to children. Generate it freshly each time. Under 35 words.`;
