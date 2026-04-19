@@ -32,7 +32,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       stop();
 
       let res;
-      const isDevMode = true; // Flip to false when you want real ElevenLabs tokens
+      const isDevMode = false; // Flip to false when you want real ElevenLabs tokens
       const isFirstTurn = turnCounterRef.current === 0;
 
       // Increment the counter so the next time this runs, isFirstTurn is false

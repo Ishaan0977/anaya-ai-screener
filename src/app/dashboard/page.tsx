@@ -2,13 +2,19 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+type AssessmentSummary = {
+  verdict: string;
+  verdict_reason: string;
+  overall_score: number;
+};
+
 type SessionSummary = {
   id: string;
   candidate_name: string;
   candidate_email: string;
   started_at: string;
   status: string;
-  assessments: { verdict: string; verdict_reason: string; overall_score: number }[];
+  assessments: AssessmentSummary[] | AssessmentSummary | null;
 };
 
 const VERDICT_STYLE: Record<string, { color: string; bg: string; border: string }> = {
@@ -19,6 +25,13 @@ const VERDICT_STYLE: Record<string, { color: string; bg: string; border: string 
 
 type FilterType = 'All' | 'Hire' | 'Hold' | 'Pass';
 
+// Supabase sometimes returns assessments as array, sometimes as object — normalise it
+function getAssessment(s: SessionSummary): AssessmentSummary | null {
+  if (!s.assessments) return null;
+  if (Array.isArray(s.assessments)) return s.assessments[0] ?? null;
+  return s.assessments;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -28,18 +41,22 @@ export default function DashboardPage() {
   useEffect(() => {
     fetch('/api/session')
       .then(r => r.json())
-      .then((data: SessionSummary[]) => { setSessions(data); setLoading(false); })
+      .then((data: SessionSummary[]) => {
+        setSessions(Array.isArray(data) ? data : []);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
-  const filtered = filter === 'All' ? sessions
-    : sessions.filter(s => s.assessments?.[0]?.verdict === filter);
+  const filtered = filter === 'All'
+    ? sessions
+    : sessions.filter(s => getAssessment(s)?.verdict === filter);
 
   const counts = {
     total: sessions.length,
-    hire: sessions.filter(s => s.assessments?.[0]?.verdict === 'Hire').length,
-    hold: sessions.filter(s => s.assessments?.[0]?.verdict === 'Hold').length,
-    pass: sessions.filter(s => s.assessments?.[0]?.verdict === 'Pass').length,
+    hire: sessions.filter(s => getAssessment(s)?.verdict === 'Hire').length,
+    hold: sessions.filter(s => getAssessment(s)?.verdict === 'Hold').length,
+    pass: sessions.filter(s => getAssessment(s)?.verdict === 'Pass').length,
   };
 
   return (
@@ -66,13 +83,13 @@ export default function DashboardPage() {
           <span style={{ fontWeight: 600, fontSize: 14, letterSpacing: '0.08em' }}>CUEMATH</span>
           <span style={{ fontSize: 12, color: 'var(--white-40)', marginLeft: 4 }}>/ HR Dashboard</span>
         </div>
-        <button onClick={() => router.push('/')} className="btn-gold" style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
+        <button onClick={() => router.push('/')} className="btn-gold"
+          style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13 }}>
           + New Interview
         </button>
       </header>
 
       <main style={{ position: 'relative', zIndex: 2, maxWidth: 900, margin: '0 auto', padding: '40px 20px' }}>
-
         <div className="fade-up" style={{ marginBottom: 32 }}>
           <span style={{ fontSize: 11, color: 'var(--gold)', letterSpacing: '0.15em', textTransform: 'uppercase', fontWeight: 600 }}>
             Talent Pipeline
@@ -85,10 +102,10 @@ export default function DashboardPage() {
         {/* Stats */}
         <div className="fade-up-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 28 }}>
           {[
-            { label: 'Total Screened', value: counts.total, color: 'var(--white)' },
-            { label: 'Recommend Hire', value: counts.hire,  color: '#4ade80' },
-            { label: 'Hold for Review', value: counts.hold, color: '#fbbf24' },
-            { label: 'Not Recommended', value: counts.pass, color: '#f87171' },
+            { label: 'Total Screened',    value: counts.total, color: 'var(--white)' },
+            { label: 'Recommend Hire',    value: counts.hire,  color: '#4ade80' },
+            { label: 'Hold for Review',   value: counts.hold,  color: '#fbbf24' },
+            { label: 'Not Recommended',   value: counts.pass,  color: '#f87171' },
           ].map(stat => (
             <div key={stat.label} className="glass" style={{ borderRadius: 18, padding: '20px 16px', textAlign: 'center' }}>
               <div style={{ fontFamily: 'Cormorant Garamond', fontSize: 40, fontWeight: 700, color: stat.color, lineHeight: 1 }}>
@@ -106,13 +123,14 @@ export default function DashboardPage() {
             const vs = f !== 'All' ? VERDICT_STYLE[f] : null;
             return (
               <button key={f} onClick={() => setFilter(f)} style={{
-                padding: '7px 18px', borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                padding: '7px 18px', borderRadius: 20, fontSize: 12,
+                fontWeight: 500, cursor: 'pointer',
                 background: active ? (vs?.bg ?? 'rgba(201,168,76,0.1)') : 'transparent',
                 color: active ? (vs?.color ?? 'var(--gold)') : 'var(--white-40)',
                 border: `1px solid ${active ? (vs?.border ?? 'rgba(201,168,76,0.3)') : 'var(--border)'}`,
                 transition: 'all 0.2s',
               }}>
-                {f}
+                {f} {f !== 'All' && `(${counts[f.toLowerCase() as 'hire'|'hold'|'pass']})`}
               </button>
             );
           })}
@@ -153,8 +171,8 @@ export default function DashboardPage() {
               </thead>
               <tbody>
                 {filtered.map((s, i) => {
-                  const a = s.assessments?.[0];
-                  const vs = a ? VERDICT_STYLE[a.verdict] : null;
+                  const a = getAssessment(s);
+                  const vs = a?.verdict ? VERDICT_STYLE[a.verdict] : null;
                   return (
                     <tr key={s.id}
                       onClick={() => router.push(`/report/${s.id}`)}
@@ -175,21 +193,26 @@ export default function DashboardPage() {
                         {new Date(s.started_at).toLocaleDateString('en-IN', { dateStyle: 'medium' })}
                       </td>
                       <td style={{ padding: '16px 20px' }}>
-                        <span style={{ fontFamily: 'Cormorant Garamond', fontSize: 22, fontWeight: 700, color: 'var(--gold)' }}>
-                          {a?.overall_score ?? '—'}
-                        </span>
-                        {a && <span style={{ fontSize: 12, color: 'var(--white-40)' }}>/5</span>}
+                        {a ? (
+                          <>
+                            <span style={{ fontFamily: 'Cormorant Garamond', fontSize: 22, fontWeight: 700, color: 'var(--gold)' }}>
+                              {a.overall_score}
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--white-40)' }}>/5</span>
+                          </>
+                        ) : <span style={{ color: 'var(--white-40)' }}>—</span>}
                       </td>
                       <td style={{ padding: '16px 20px' }}>
                         {vs ? (
                           <span style={{
                             padding: '4px 12px', borderRadius: 20,
                             fontSize: 11, fontWeight: 600,
-                            background: vs.bg, color: vs.color, border: `1px solid ${vs.border}`,
+                            background: vs.bg, color: vs.color,
+                            border: `1px solid ${vs.border}`,
                           }}>
                             {a?.verdict}
                           </span>
-                        ) : '—'}
+                        ) : <span style={{ color: 'var(--white-40)' }}>—</span>}
                       </td>
                       <td style={{ padding: '16px 20px', textAlign: 'right' }}>
                         <span style={{ fontSize: 12, color: 'var(--gold)' }}>View →</span>

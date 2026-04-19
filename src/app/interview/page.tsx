@@ -104,8 +104,6 @@ function InterviewContent() {
   const hasStarted = useRef(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // --- NEW: Refs to track when audio finishes playing ---
   const pendingTurnRef = useRef<{
     transcript: TranscriptEntry[];
     turn: number;
@@ -120,6 +118,16 @@ function InterviewContent() {
   const { stopListening, startListening, isListening } = useSpeechRecognition();
   const { isPlaying, isFetching, playText, analyserNode } = useAudioPlayer();
   const { signals, recordResponseStart } = useIntegrityMonitor(state === 'waiting');
+
+  // ── Play local opening MP3 — no ElevenLabs token used ──
+  const playOpeningAudio = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      const audio = new Audio('/anaya-opening.mp3');
+      audio.onended = () => resolve();
+      audio.onerror = () => resolve(); // resolve even if file missing
+      audio.play().catch(() => resolve());
+    });
+  }, []);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -138,12 +146,11 @@ function InterviewContent() {
     if (state === 'complete') localStorage.removeItem('anaya_session');
   }, [state]);
 
-  // Tab switch warning — visible banner
+  // Tab switch warning
   useEffect(() => {
     function handleVisibility() {
       if (document.hidden && (state === 'waiting' || state === 'listening')) {
         setTabWarning(true);
-        // Auto-dismiss after 6 seconds
         if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
         warningTimerRef.current = setTimeout(() => setTabWarning(false), 6000);
       }
@@ -194,7 +201,6 @@ function InterviewContent() {
     router.push(`/report/${sessionId}`);
   }, [sessionId, router, signals]);
 
-  // Auto-start mic after Anaya finishes speaking
   const autoStartMic = useCallback(async () => {
     recordResponseStart();
     setState('listening');
@@ -215,6 +221,27 @@ function InterviewContent() {
       setTimeoutMsg('');
 
       try {
+        // ── Turn 0: play local MP3, no API call ──
+        if (currentTurn === 0) {
+          const openingText = `Hi there! I'm Anaya from Cuemath's talent team — thanks so much for making time today. This will be a relaxed ten-minute conversation just a change to get to know you better. No trick questions — just be yourself. Shall we begin?`;
+
+          setTranscript([{ role: 'anaya', text: openingText, timestamp: Date.now() }]);
+          setTurnIndex(1);
+          setState('anaya_speaking');
+          setStatusMsg('Anaya is speaking...');
+
+          await playOpeningAudio();
+
+          // Queue mic start via pendingTurnRef so the isPlaying effect handles it
+          // But since we used a local Audio element (not useAudioPlayer),
+          // we call autoStartMic directly here
+          setState('waiting');
+          setStatusMsg('Your turn — speak now...');
+          await autoStartMic();
+          return;
+        }
+
+        // ── All other turns: stream from API ──
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -225,49 +252,118 @@ function InterviewContent() {
             turn_index: currentTurn,
             follow_up_count: currentFollowUpCount,
             follow_up_used_for: currentFollowUpUsedFor,
+            stream: true,
           }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
 
-        if (data.interview_complete && !data.text) {
-          await triggerAssessment();
-          return;
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(err.error ?? 'API error');
         }
 
-        if (typeof data.question_number === 'number') setQuestionNumber(data.question_number);
-        if (typeof data.follow_up_count === 'number') setFollowUpCount(data.follow_up_count);
-        if (data.follow_up_used_for !== undefined) setFollowUpUsedFor(data.follow_up_used_for);
+        if (!res.body) throw new Error('No response body');
 
-        const newEntry: TranscriptEntry = {
-          role: 'anaya', text: data.text, timestamp: Date.now(),
-        };
-        setTranscript((prev) => [...prev, newEntry]);
-        setTurnIndex(data.next_turn);
+        // ── Parse SSE stream ──
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let anayaText = '';
+        let metadata: {
+          done?: boolean;
+          text?: string;
+          next_turn?: number;
+          interview_complete?: boolean;
+          question_number?: number;
+          follow_up_count?: number;
+          follow_up_used_for?: number | null;
+          error?: string;
+        } = {};
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() ?? '';
+
+          for (const part of parts) {
+            const lines = part.split('\n');
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr) continue;
+              try {
+                const parsed = JSON.parse(jsonStr);
+                if (parsed.chunk) anayaText += parsed.chunk;
+                if (parsed.done) {
+                  metadata = parsed;
+                  if (parsed.text) anayaText = parsed.text;
+                }
+                if (parsed.error) throw new Error(parsed.error);
+              } catch (e) {
+                if (e instanceof SyntaxError) continue;
+                throw e;
+              }
+            }
+          }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim()) {
+          for (const line of buffer.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const jsonStr = line.slice(6).trim();
+            if (!jsonStr) continue;
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.chunk) anayaText += parsed.chunk;
+              if (parsed.done && parsed.text) anayaText = parsed.text;
+              if (parsed.error) throw new Error(parsed.error);
+            } catch (e) {
+              if (!(e instanceof SyntaxError)) throw e;
+            }
+          }
+        }
+
+        if (!anayaText.trim()) throw new Error('Empty response from AI');
+        anayaText = anayaText.trim();
+
+        // Update metadata
+        if (typeof metadata.question_number === 'number') setQuestionNumber(metadata.question_number);
+        if (typeof metadata.follow_up_count === 'number') setFollowUpCount(metadata.follow_up_count);
+        if (metadata.follow_up_used_for !== undefined) setFollowUpUsedFor(metadata.follow_up_used_for ?? null);
+
+        // Add to transcript
+        setTranscript((prev) => [...prev, { role: 'anaya', text: anayaText, timestamp: Date.now() }]);
+        setTurnIndex(metadata.next_turn ?? currentTurn + 1);
 
         setState('anaya_speaking');
         setStatusMsg('Anaya is speaking...');
-        await playText(data.text);
 
-        if (data.interview_complete) {
+        // Play via ElevenLabs (useAudioPlayer)
+        // The isPlaying effect below will auto-start mic when done
+        if (metadata.interview_complete) {
+          await playText(anayaText);
           await triggerAssessment();
         } else {
-          // --- NEW: Instead of instantly starting the mic, we save the turn data ---
-          // The useEffect below will handle starting the mic when audio finishes.
           pendingTurnRef.current = {
             transcript: currentTranscript,
             turn: currentTurn,
             followUpCount: currentFollowUpCount,
             followUpUsedFor: currentFollowUpUsedFor,
           };
+          await playText(anayaText);
         }
+
       } catch (err) {
-        console.error(err);
-        setStatusMsg('Connection issue. Please refresh the page.');
+        console.error('sendToAnaya error:', err);
+        setState('waiting');
+        setStatusMsg(`Something went wrong — tap mic to try again`);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, candidateName, playText, triggerAssessment, autoStartMic]
+    [sessionId, candidateName, playText, triggerAssessment, autoStartMic, playOpeningAudio]
   );
 
   function startTimeoutWatcher(
@@ -281,10 +377,8 @@ function InterviewContent() {
 
     timeoutRef.current = setTimeout(() => {
       setTimeoutMsg("Take your time — respond whenever you're ready.");
-
       timeoutRef.current = setTimeout(async () => {
         setTimeoutMsg('');
-        // Stop recording if still going
         await stopListening();
         const entry: TranscriptEntry = {
           role: 'candidate',
@@ -296,18 +390,17 @@ function InterviewContent() {
         await saveTranscriptTurn('candidate', entry.text, currentTurn);
         await sendToAnaya(newTranscript, currentTurn + 1, currentFollowUpCount, currentFollowUpUsedFor);
       }, SKIP_TIMEOUT - PROMPT_TIMEOUT);
-
     }, PROMPT_TIMEOUT);
   }
 
-  // --- NEW LOGIC: This watches for the exact moment the audio finishes playing ---
+  // Watch for audio finishing → auto-start mic
   useEffect(() => {
     if (prevIsPlaying.current && !isPlaying) {
       if (state === 'anaya_speaking' && pendingTurnRef.current) {
-        const { transcript, turn, followUpCount, followUpUsedFor } = pendingTurnRef.current;
-        autoStartMic();
-        startTimeoutWatcher(transcript, turn, followUpCount, followUpUsedFor);
+        const { transcript: t, turn, followUpCount: fc, followUpUsedFor: fu } = pendingTurnRef.current;
         pendingTurnRef.current = null;
+        autoStartMic();
+        startTimeoutWatcher(t, turn, fc, fu);
       }
     }
     prevIsPlaying.current = isPlaying;
@@ -320,7 +413,6 @@ function InterviewContent() {
     sendToAnaya([], 0, 0, null);
   }, [sessionId, sendToAnaya]);
 
-  // Manual stop recording — sends response to Anaya
   async function handleStopRecording() {
     if (state !== 'listening') return;
     clearTimeouts();
@@ -331,14 +423,11 @@ function InterviewContent() {
 
     if (!spoken || spoken.trim().length < 2) {
       setStatusMsg("Didn't catch that — mic is on again");
-      // Re-enable mic if nothing was captured
       await autoStartMic();
       return;
     }
 
-    const entry: TranscriptEntry = {
-      role: 'candidate', text: spoken, timestamp: Date.now(),
-    };
+    const entry: TranscriptEntry = { role: 'candidate', text: spoken, timestamp: Date.now() };
     const newTranscript = [...transcript, entry];
     setTranscript(newTranscript);
     await saveTranscriptTurn('candidate', spoken, turnIndex);
@@ -376,15 +465,11 @@ function InterviewContent() {
               </p>
             </div>
           </div>
-          <button
-            onClick={() => setTabWarning(false)}
-            style={{
-              background: 'rgba(255,255,255,0.2)', border: 'none',
-              color: 'white', borderRadius: 8, padding: '6px 14px',
-              fontSize: 12, cursor: 'pointer', fontWeight: 600,
-            }}>
-            Dismiss
-          </button>
+          <button onClick={() => setTabWarning(false)} style={{
+            background: 'rgba(255,255,255,0.2)', border: 'none',
+            color: 'white', borderRadius: 8, padding: '6px 14px',
+            fontSize: 12, cursor: 'pointer', fontWeight: 600,
+          }}>Dismiss</button>
         </div>
       )}
 
@@ -501,10 +586,7 @@ function InterviewContent() {
             display: 'flex', flexDirection: 'column', gap: 10,
           }}>
             {transcript.filter(e => e.role === 'anaya').length === 0 && (
-              <p style={{
-                textAlign: 'center', color: 'var(--white-40)',
-                fontSize: 13, padding: '24px 0',
-              }}>
+              <p style={{ textAlign: 'center', color: 'var(--white-40)', fontSize: 13, padding: '24px 0' }}>
                 Questions will appear here...
               </p>
             )}
@@ -561,7 +643,6 @@ function InterviewContent() {
                 </div>
               </div>
             )}
-
             <div ref={transcriptEndRef} />
           </div>
         </div>
@@ -577,11 +658,10 @@ function InterviewContent() {
           </div>
         )}
 
-        {/* Mic control — only stop button shown (mic auto-starts) */}
+        {/* Mic control */}
         {state !== 'complete' && (
           <div className="fade-up-3" style={{
-            display: 'flex', flexDirection: 'column',
-            alignItems: 'center', gap: 12,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12,
           }}>
             {state === 'listening' ? (
               <>
@@ -592,20 +672,17 @@ function InterviewContent() {
                     width: 72, height: 72, borderRadius: '50%',
                     background: 'linear-gradient(135deg, #4ade80, #22c55e)',
                     border: 'none', cursor: 'pointer',
-                    display: 'flex', alignItems: 'center',
-                    justifyContent: 'center', fontSize: 26,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 26,
                   }}>⏹</button>
-                <p style={{ fontSize: 12, color: '#4ade80' }}>
-                  Tap to send your response
-                </p>
+                <p style={{ fontSize: 12, color: '#4ade80' }}>Tap to send your response</p>
               </>
             ) : (
               <div style={{
                 width: 72, height: 72, borderRadius: '50%',
                 background: 'rgba(255,255,255,0.04)',
                 border: '1px solid var(--border)',
-                display: 'flex', alignItems: 'center',
-                justifyContent: 'center', fontSize: 26, opacity: 0.3,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 26, opacity: 0.3,
               }}>🎙️</div>
             )}
           </div>
@@ -614,8 +691,7 @@ function InterviewContent() {
         {state === 'complete' && (
           <div className="fade-in glass" style={{
             borderRadius: 20, padding: '20px', textAlign: 'center',
-            borderColor: 'rgba(201,168,76,0.2)',
-            background: 'rgba(201,168,76,0.04)',
+            borderColor: 'rgba(201,168,76,0.2)', background: 'rgba(201,168,76,0.04)',
           }}>
             <p style={{ fontSize: 14, color: 'var(--gold)' }}>
               ✨ Interview complete — generating your report...
@@ -630,10 +706,7 @@ function InterviewContent() {
 export default function InterviewPage() {
   return (
     <Suspense fallback={
-      <div style={{
-        minHeight: '100vh', display: 'flex',
-        alignItems: 'center', justifyContent: 'center',
-      }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <p style={{ color: 'var(--white-40)', fontSize: 14 }}>Loading...</p>
       </div>
     }>
