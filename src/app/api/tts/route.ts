@@ -1,55 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
-  const { text } = await req.json();
-
-  if (!text || text.trim().length === 0) {
-    return NextResponse.json({ error: 'No text provided' }, { status: 400 });
-  }
-
-  const trimmed = text.slice(0, 400);
-
   try {
-    const response = await fetch(
-      "https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9",
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': process.env.ELEVENLABS_API_KEY || '',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: trimmed,
-          model_id: 'eleven_turbo_v2', 
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.3,
-            use_speaker_boost: true,
-          },
-        }),
-      }
-    );
+    const { text } = await req.json();
+    
+    const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+    const voiceId = process.env.ELEVENLABS_VOICE_ID?.trim();
 
-    if (!response.ok) {
-      console.error('ElevenLabs API failed with status:', response.status);
-      return NextResponse.json({ error: 'TTS failed' }, { status: response.status });
+    if (!apiKey || !voiceId) {
+      console.error("❌ TTS ERROR: Missing ElevenLabs API Key or Voice ID in .env.local");
+      return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 });
     }
 
-    // THE FIX: Force it into a raw Node Buffer so Next.js cannot corrupt the binary
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': apiKey, // <-- This is the exact header ElevenLabs demands
+      },
+      body: JSON.stringify({
+        text,
+        model_id: 'eleven_turbo_v2_5', // The fastest model for voice AI
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      // If it fails, extract the exact error message from ElevenLabs
+      const errorText = await response.text();
+      console.error(`❌ ElevenLabs Failed! Status: ${response.status}`);
+      console.error(`❌ ElevenLabs Reason: ${errorText}`);
+      return NextResponse.json({ error: 'TTS request failed' }, { status: response.status });
+    }
+
     const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
     
-    return new NextResponse(buffer, {
+    return new NextResponse(arrayBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Content-Length': buffer.length.toString(),
       },
     });
 
-  } catch (err) {
-    console.error('TTS route error:', err);
-    return NextResponse.json({ error: 'TTS service unavailable' }, { status: 500 });
+  } catch (error) {
+    console.error('❌ Internal TTS Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

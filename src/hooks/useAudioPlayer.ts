@@ -4,7 +4,7 @@ import { useState, useRef, useCallback } from 'react';
 interface UseAudioPlayerReturn {
   isPlaying: boolean;
   isFetching: boolean;
-  playText: (text: string) => Promise<void>; // Back to normal, no turnIndex needed!
+  playText: (text: string) => Promise<void>;
   stop: () => void;
   analyserNode: AnalyserNode | null;
 }
@@ -15,9 +15,6 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  
-  // THE FIX: The hook keeps track of its own turns internally
-  const turnCounterRef = useRef(0);
 
   const stop = useCallback(() => {
     sourceRef.current?.stop();
@@ -32,22 +29,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       stop();
 
       let res;
-      const isDevMode = false; // Flip to false when you want real ElevenLabs tokens
-      const isFirstTurn = turnCounterRef.current === 0;
+      // 🛑 DEV MODE TOGGLE: Set to true to save ElevenLabs credits
+      const isDevMode = false; 
 
-      // Increment the counter so the next time this runs, isFirstTurn is false
-      turnCounterRef.current += 1;
-
-      if (isFirstTurn || isDevMode) {
-        if (isDevMode && !isFirstTurn) {
-          console.log("🛑 DEV MODE: Skipping ElevenLabs API.");
-          console.log("Anaya says:", text);
-        }
+      if (isDevMode) {
+        console.log("🛑 DEV MODE ACTIVE: ElevenLabs skipped.");
+        console.log("🤖 Anaya says:", text);
         
-        // Grab the free local file for the intro or dev mode
-        res = await fetch('/anaya-opening.mp3');
+        // Fetch your local mp3 just to trigger the visualizer and timing loop
+        res = await fetch('/anaya-opening.mp3'); 
       } else {
-        // Normal Production API Call
+        // 🚀 PRODUCTION MODE: Hit ElevenLabs
         res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
