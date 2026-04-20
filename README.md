@@ -11,7 +11,7 @@
 ---
 
 ## 🔗 Live Demo
-**[Try it here →](https://anaya-ai-screener.vercel.app/)**
+**[Try it here →](https://anaya-ai-screener.vercel.app/)** : https://anaya-ai-screener.vercel.app 
 
 *(Evaluator Note: Use `test@gmail.com` to bypass the email OTP verification and instantly enter the interview with code `123456`)*
 
