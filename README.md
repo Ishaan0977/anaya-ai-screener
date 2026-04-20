@@ -128,7 +128,7 @@ graph TD;
 ## 💻 Local Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/anaya-ai-screener
+git clone https://github.com/Ishaan0977/anaya-ai-screener.git
 cd anaya-ai-screener
 npm install
 ```
