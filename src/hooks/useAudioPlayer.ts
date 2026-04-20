@@ -30,7 +30,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
       let res;
       // 🛑 DEV MODE TOGGLE: Set to true to save ElevenLabs credits
-      const isDevMode = true; 
+      const isDevMode = false; 
 
       if (isDevMode) {
         console.log("🛑 DEV MODE ACTIVE: ElevenLabs skipped.");
