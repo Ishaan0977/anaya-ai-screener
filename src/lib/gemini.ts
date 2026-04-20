@@ -248,14 +248,14 @@ These answers were captured via speech-to-text technology. The transcription may
 
 DO NOT penalise candidates for transcription artifacts. Judge the IDEAS and INTENT, not surface-level grammar or spelling. Give the benefit of the doubt when an answer is partially unclear — assume the candidate meant something reasonable.
 
-SCORING PHILOSOPHY — be fair and encouraging:
-- Score 3 (Adequate) as the baseline for a candidate who gives reasonable, sensible answers
-- Score 4 (Strong) for candidates who show clear warmth, good examples, or structured thinking
-- Score 5 (Exceptional) only for truly outstanding responses
-- Score 2 (Weak) only if the answer is clearly unhelpful or concerning
-- Score 1 (Poor) only for actively harmful responses (e.g. advocating punishment)
-- Most real candidates who completed the interview should score between 3-4 overall
-- A candidate who shows genuine care for students and reasonable teaching instincts should PASS (Hire or Hold)
+SCORING PHILOSOPHY — BE BALANCED, OBJECTIVE, AND FAIR:
+You must critically evaluate the substance of the answers. Reward strong candidates, but firmly penalize bad interviews.
+- Score 5 (Exceptional): Flawless, highly structured, deeply empathetic, and creative answers. Give this if they truly impress.
+- Score 4 (Strong): Clear, well-reasoned answers that directly address the prompt with good examples. This is a solid, successful answer.
+- Score 3 (Adequate): Average answers. The candidate understood the prompt but lacked depth, clarity, or strong examples.
+- Score 2 (Weak): Messy, confusing, overly brief, or highly tangential answers. They failed to clearly answer the core question.
+- Score 1 (Poor): Actively harmful, completely irrelevant, or entirely incomprehensible answers.
+- NOTE: If they give great, empathetic examples, confidently score them a 4 or 5. If they give one-word answers or ramble incoherently, score them a 1 or 2.
 
 CANDIDATE ANSWERS:
 ${answers}
@@ -264,7 +264,10 @@ Return ONLY valid JSON, no markdown, no extra text:
 {"verdict":"Hold","verdict_reason":"Brief reason under 60 chars","overall_score":3.2,"tone_badge":"Empathetic","tone_description":"Speaks with warmth and genuine care for students","scores":[{"dimension":"Communication Clarity","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Warmth & Patience","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Ability to Simplify","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"English Fluency","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"},{"dimension":"Adaptability","score":3,"evidence_quote":"short quote max 50 chars","notes":"one sentence max 80 chars"}],"red_flags":["concern if any, or empty string"],"standout_moments":["best thing they said"]}
 
 SCORING 1-5: 5=Exceptional 4=Strong 3=Adequate 2=Weak 1=Poor
-VERDICT: Hire>=4.0 no dim<3 | Hold=3.0-3.9 or one dim<3 | Pass<3.0 or two+ dims<3
+VERDICT RULES — relaxed thresholds:
+- "Hire": overall_score >= 3.5 AND no dimension below 3
+- "Hold": overall_score 2.5–3.4 OR one dimension below 3
+- "Pass": overall_score < 2.5 OR two or more dimensions below 3
 tone_badge: ONE word from: Empathetic, Structured, Enthusiastic, Reserved, Analytical, Nurturing, Confident, Methodical
 tone_description: One sentence, max 60 chars
 Replace all placeholder values with real scores. Keep all strings SHORT.`;
